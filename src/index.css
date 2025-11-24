@@ -1,0 +1,12 @@
+@import "tailwindcss"; /* <--- ESTA ES LA SINTAXIS DE V4 */
+
+/* Configuración del tema (opcional, para tus colores personalizados) */
+@theme {
+  --color-board: #2c3e50;
+  --color-cell: #eceff1;
+}
+
+/* Resto de tus estilos */
+body {
+  background-color: #1a202c;
+}
