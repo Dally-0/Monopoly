@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { User, Bot, Gamepad2, Ghost, Dice5, Home, MapPin, Zap, Train } from 'lucide-react';
+import { User, Bot, Gamepad2, Ghost, Dice5, Home, MapPin, Zap, Train, Skull } from 'lucide-react';
 
 // --- CONFIGURACIÓN COMPACTA ---
 const COORDENADAS = [
@@ -47,9 +47,8 @@ const CONFIG_JUGS = [
 const esperar = (ms) => new Promise(r => setTimeout(r, ms));
 
 export default function App() {
-  const [juego, setJuego] = useState({ activo: false, jugs: [], turno: 0 });
+  const [juego, setJuego] = useState({ activo: false, jugs: [], turno: 0, perdedor: null });
   const [dado, setDado] = useState({ valor: null, girando: false });
-  // Añadido 'bloqueado' para evitar interacciones durante transiciones de turno
   const [ui, setUi] = useState({ aviso: null, modal: null, moviendo: false, bloqueado: false });
   const [bienes, setBienes] = useState({ duenos: {}, niveles: {} });
 
@@ -60,19 +59,17 @@ export default function App() {
 
   const iniciar = (n) => {
     setJuego({
-      activo: true, turno: 0,
+      activo: true, turno: 0, perdedor: null,
       jugs: Array.from({ length: n }, (_, k) => ({ id: k, nom: `J${k+1}`, $ : 1500, pos: 0, ...CONFIG_JUGS[k] }))
     });
     setBienes({ duenos: {}, niveles: {} });
-    setUi({ aviso: null, modal: null, moviendo: false, bloqueado: false }); // Reset UI
+    setUi({ aviso: null, modal: null, moviendo: false, bloqueado: false });
     notificar("¡Bienvenidos a Cochabamba!", "success");
   };
 
   const lanzar = async () => {
-    // Bloqueo estricto: Si está girando, moviendo, hay modal, O está bloqueado (cambiando turno), no hacer nada.
-    if (dado.girando || ui.moviendo || ui.modal || ui.bloqueado) return;
+    if (dado.girando || ui.moviendo || ui.modal || ui.bloqueado || !juego.activo) return;
     
-    // Inmediatamente bloqueamos el turno
     setUi(p => ({ ...p, aviso: null, bloqueado: true }));
     setDado({ valor: null, girando: true });
     
@@ -86,7 +83,6 @@ export default function App() {
   };
 
   const mover = async (pasos) => {
-    // Capturamos el jugador ACTUAL al inicio del movimiento
     let jug = { ...juego.jugs[juego.turno] }; 
     let pActual = jug.pos;
 
@@ -94,10 +90,9 @@ export default function App() {
       await esperar(300);
       pActual = (pActual + 1) % 28;
       if (pActual === 0) {
-        jug.$ += 200; // Actualizamos la referencia local
+        jug.$ += 200;
         notificar("Vuelta completa: +200 Bs.");
       }
-      // Actualizamos estado global
       actJugador(jug.id, { pos: pActual, $: jug.$ });
     }
     setUi(p => ({ ...p, moviendo: false }));
@@ -106,22 +101,32 @@ export default function App() {
 
   const actJugador = (id, datos) => setJuego(p => ({ ...p, jugs: p.jugs.map(j => j.id === id ? { ...j, ...datos } : j) }));
 
+  const verificarGameOver = (nuevoSaldo, jugador) => {
+    if (nuevoSaldo < -500) {
+      setJuego(prev => ({ ...prev, activo: false, perdedor: jugador }));
+      setUi(prev => ({ ...prev, bloqueado: true })); 
+      return true; 
+    }
+    return false;
+  };
+
   const evaluar = (pos, j) => {
     const casilla = TABLERO[pos];
     const dueno = bienes.duenos[pos];
 
     if (['p', 'r', 's'].includes(casilla.t)) {
       if (dueno !== undefined && dueno !== j.id) {
-        pagar(j, casilla, pos, dueno);
+        const muerto = pagar(j, casilla, pos, dueno);
+        if (muerto) return; 
       } else if (dueno === undefined) {
         setUi(p => ({ ...p, modal: { ...casilla, id: pos } }));
-        // No llamamos a sigTurno aquí, esperamos la acción del usuario.
-        // El estado 'bloqueado' sigue siendo true desde 'lanzar', así que el botón sigue desactivado.
         return; 
       }
     } else if (casilla.t === 't') {
-      actJugador(j.id, { $: j.$ - 200 });
+      const nuevoSaldo = j.$ - 200;
+      actJugador(j.id, { $: nuevoSaldo });
       notificar("Impuestos: -200 Bs.", "error");
+      if (verificarGameOver(nuevoSaldo, j)) return;
     } else if (casilla.t === 'g') {
       notificar("¡A la cárcel!", "error");
       setTimeout(() => { 
@@ -155,35 +160,44 @@ export default function App() {
   const pagar = (pagador, c, pos, idDueno) => {
     const nvl = bienes.niveles[pos] || 1;
     const monto = Math.floor(c.$ * 0.1) * Math.pow(2, nvl - 1);
-    actJugador(pagador.id, { $: pagador.$ - monto });
+    const nuevoSaldo = pagador.$ - monto;
+
+    actJugador(pagador.id, { $: nuevoSaldo });
     actJugador(idDueno, { $: juego.jugs[idDueno].$ + monto });
     setBienes(p => ({ ...p, niveles: { ...p.niveles, [pos]: nvl + 1 } }));
     notificar(`Alquiler: -${monto} Bs.`, "info");
+
+    return verificarGameOver(nuevoSaldo, pagador);
   };
 
   const sigTurno = () => {
-    // Esperamos 1s para que el usuario vea el resultado
+    if (!juego.activo) return;
     setTimeout(() => {
-        setJuego(p => ({ 
-            ...p, 
-            turno: (p.turno + 1) % p.jugs.length 
-        }));
-        // ¡IMPORTANTE! Solo desbloqueamos el juego DESPUÉS de haber cambiado el turno
+        setJuego(p => {
+          if (!p.activo) return p; 
+          return { ...p, turno: (p.turno + 1) % p.jugs.length };
+        });
         setUi(p => ({ ...p, bloqueado: false }));
     }, 1000);
   };
 
   return (
     <div className="h-screen w-full flex flex-col items-center justify-center bg-sky-100 font-sans text-slate-800 overflow-hidden select-none">
+      
+      {/* TÍTULO NUEVO AÑADIDO */}
+      <h1 className="text-5xl font-black mb-6 drop-shadow-xl tracking-tighter select-none transform -rotate-2">
+        <span className="text-sky-500">Ll'ajta</span>
+        <span className="text-white">polio</span>
+      </h1>
+
       <div className="relative w-full max-w-[420px] aspect-square bg-white rounded-xl shadow-2xl border-4 border-sky-600 p-1">
         <div className="grid grid-cols-8 grid-rows-8 w-full h-full gap-[2px] bg-sky-50">
           {TABLERO.map((c, i) => <Casilla key={i} datos={c} i={i} dueno={bienes.duenos[i]} nvl={bienes.niveles[i]} jugs={juego.jugs} />)}
           <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
             <button 
               onClick={lanzar} 
-              // Deshabilitado si el juego no está activo, el dado gira, se mueve ficha, hay modal O el sistema está "bloqueado" procesando turno
               disabled={!juego.activo || dado.girando || ui.moviendo || ui.modal || ui.bloqueado} 
-              className={`pointer-events-auto w-24 h-24 rounded-2xl flex items-center justify-center bg-white shadow-xl border-4 border-sky-100 transition-transform active:scale-95 ${(!juego.activo || dado.girando || ui.moviendo || ui.bloqueado) ? 'opacity-80' : 'hover:scale-105'}`}
+              className={`pointer-events-auto w-24 h-24 rounded-2xl flex items-center justify-center bg-white shadow-xl border-4 border-sky-100 transition-transform active:scale-95 ${(!juego.activo || dado.girando || ui.moviendo || ui.bloqueado) ? 'opacity-80 grayscale' : 'hover:scale-105'}`}
             >
               <AnimatePresence mode="wait">
                 {dado.girando ? 
@@ -193,8 +207,9 @@ export default function App() {
                 : 
                   <motion.div initial={{ scale: 0 }} animate={{ scale: 1 }} className="flex flex-col items-center">
                     <span className="text-3xl font-bold text-sky-600">{dado.valor || "Tirar"}</span>
-                    {dado.valor && !ui.bloqueado && <span className="text-[10px] text-slate-400 font-bold">TU TURNO</span>}
-                    {ui.bloqueado && <span className="text-[10px] text-orange-400 font-bold">ESPERE...</span>}
+                    {juego.activo && dado.valor && !ui.bloqueado && <span className="text-[10px] text-slate-400 font-bold">TU TURNO</span>}
+                    {juego.activo && ui.bloqueado && <span className="text-[10px] text-orange-400 font-bold">ESPERE...</span>}
+                    {!juego.activo && juego.perdedor && <span className="text-[10px] text-red-500 font-bold">FIN</span>}
                   </motion.div>
                 }
               </AnimatePresence>
@@ -204,16 +219,31 @@ export default function App() {
       </div>
 
       <div className="mt-6 flex gap-4 w-full px-4 overflow-x-auto justify-center">
-        {juego.activo && juego.jugs.map((j, k) => (
-          <div key={k} className={`flex flex-col items-center p-2 rounded-lg min-w-[80px] transition-all border-2 ${k === juego.turno ? 'bg-white border-yellow-400 scale-110 shadow-lg' : 'bg-white/50 border-transparent scale-90'}`}>
+        {juego.jugs.length > 0 && juego.jugs.map((j, k) => (
+          <div key={k} className={`flex flex-col items-center p-2 rounded-lg min-w-[80px] transition-all border-2 ${k === juego.turno && juego.activo ? 'bg-white border-yellow-400 scale-110 shadow-lg' : 'bg-white/50 border-transparent scale-90'} ${j.$ < -500 ? 'opacity-50 grayscale' : ''}`}>
             <div className={`w-10 h-10 rounded-full ${j.c} text-white flex items-center justify-center mb-1`}><j.i size={20}/></div>
             <span className="text-xs font-bold">{j.nom}</span>
-            <span className="text-xs text-green-600 font-mono">{j.$} Bs</span>
+            <span className={`text-xs font-mono font-bold ${j.$ < 0 ? 'text-red-600' : 'text-green-600'}`}>{j.$} Bs</span>
           </div>
         ))}
       </div>
 
-      {!juego.activo && <div className="absolute inset-0 bg-sky-900/80 backdrop-blur-sm flex items-center justify-center z-50"><div className="bg-white p-8 rounded-2xl shadow-2xl text-center max-w-sm"><h1 className="text-3xl font-bold text-sky-600 mb-2">MONOPOLIO</h1><h2 className="text-xl text-slate-500 mb-6">COCHABAMBA</h2><div className="flex justify-center gap-3">{[2,3,4].map(n => <button key={n} onClick={() => iniciar(n)} className="w-16 h-16 rounded-xl bg-slate-100 hover:bg-sky-100 font-bold text-xl border-2 border-slate-200 transition-colors">{n}</button>)}</div></div></div>}
+      {!juego.activo && !juego.perdedor && <div className="absolute inset-0 bg-sky-900/80 backdrop-blur-sm flex items-center justify-center z-50"><div className="bg-white p-8 rounded-2xl shadow-2xl text-center max-w-sm"><h1 className="text-3xl font-bold text-sky-600 mb-2">Ll'ajtapolio</h1><h2 className="text-xl text-slate-500 mb-6">Cochabamba</h2><div className="flex justify-center gap-3">{[2,3,4].map(n => <button key={n} onClick={() => iniciar(n)} className="w-16 h-16 rounded-xl bg-slate-100 hover:bg-sky-100 font-bold text-xl border-2 border-slate-200 transition-colors">{n}</button>)}</div></div></div>}
+
+      {!juego.activo && juego.perdedor && (
+        <motion.div initial={{opacity:0}} animate={{opacity:1}} className="absolute inset-0 bg-red-900/90 backdrop-blur-md flex items-center justify-center z-50">
+          <div className="bg-white p-8 rounded-2xl shadow-2xl text-center max-w-sm border-4 border-red-500">
+            <Skull size={64} className="text-red-600 mx-auto mb-4"/>
+            <h1 className="text-4xl font-black text-slate-800 mb-2">GAME OVER</h1>
+            <p className="text-lg text-slate-600 mb-6">
+              El jugador <span className="font-bold text-red-600">{juego.perdedor.nom}</span> ha quebrado.
+            </p>
+            <button onClick={() => setJuego(p => ({...p, perdedor: null}))} className="px-6 py-3 bg-slate-800 text-white rounded-xl font-bold hover:bg-slate-700 transition-colors w-full">
+              Volver al Menú
+            </button>
+          </div>
+        </motion.div>
+      )}
 
       <AnimatePresence>
         {ui.modal && <motion.div initial={{opacity:0, scale:0.8}} animate={{opacity:1, scale:1}} exit={{opacity:0}} className="absolute inset-0 bg-black/50 flex items-center justify-center z-50">
