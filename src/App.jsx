@@ -36,7 +36,7 @@ const TABLERO = [
   { n: "La Recoleta", t: "p", $: 280, c: "bg-green-500" },
   { n: "Aranjuez", t: "p", $: 300, c: "bg-green-600" },
   { n: "Aeropuerto", t: "r", $: 200, c: "bg-slate-800" },
-  { n: "El Bosque", t: "p", $: 320, c: "bg-green-700" },
+  { n: "Parque Tunari", t: "p", $: 320, c: "bg-green-700" },
 ];
 
 const CONFIG_JUGS = [
