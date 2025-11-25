@@ -3,12 +3,11 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { User, Bot, Gamepad2, Ghost, Dice5, Home, MapPin, Zap, Train } from 'lucide-react';
 
 // --- CONFIGURACIÓN COMPACTA ---
-const COORDENADAS = [ // Grid 8x8 perimetral
+const COORDENADAS = [
   [8,8],[8,7],[8,6],[8,5],[8,4],[8,3],[8,2],[8,1],[7,1],[6,1],[5,1],[4,1],[3,1],[2,1],
   [1,1],[1,2],[1,3],[1,4],[1,5],[1,6],[1,7],[1,8],[2,8],[3,8],[4,8],[5,8],[6,8],[7,8]
 ];
 
-// Tipos: i=inicio, p=propiedad, c=cofre/suerte, t=impuesto, r=tren, s=servicio, j=cárcel, k=parking, g=ir_cárcel
 const TABLERO = [
   { n: "SALIDA", t: "i", c: "bg-slate-200" },
   { n: "Av. Barrientos", t: "p", $: 60, c: "bg-red-700" },
@@ -50,7 +49,8 @@ const esperar = (ms) => new Promise(r => setTimeout(r, ms));
 export default function App() {
   const [juego, setJuego] = useState({ activo: false, jugs: [], turno: 0 });
   const [dado, setDado] = useState({ valor: null, girando: false });
-  const [ui, setUi] = useState({ aviso: null, modal: null, moviendo: false });
+  // Añadido 'bloqueado' para evitar interacciones durante transiciones de turno
+  const [ui, setUi] = useState({ aviso: null, modal: null, moviendo: false, bloqueado: false });
   const [bienes, setBienes] = useState({ duenos: {}, niveles: {} });
 
   const notificar = (txt, tipo = 'info') => {
@@ -64,12 +64,16 @@ export default function App() {
       jugs: Array.from({ length: n }, (_, k) => ({ id: k, nom: `J${k+1}`, $ : 1500, pos: 0, ...CONFIG_JUGS[k] }))
     });
     setBienes({ duenos: {}, niveles: {} });
+    setUi({ aviso: null, modal: null, moviendo: false, bloqueado: false }); // Reset UI
     notificar("¡Bienvenidos a Cochabamba!", "success");
   };
 
   const lanzar = async () => {
-    if (dado.girando || ui.moviendo) return;
-    setUi(p => ({ ...p, aviso: null }));
+    // Bloqueo estricto: Si está girando, moviendo, hay modal, O está bloqueado (cambiando turno), no hacer nada.
+    if (dado.girando || ui.moviendo || ui.modal || ui.bloqueado) return;
+    
+    // Inmediatamente bloqueamos el turno
+    setUi(p => ({ ...p, aviso: null, bloqueado: true }));
     setDado({ valor: null, girando: true });
     
     await esperar(800);
@@ -82,16 +86,18 @@ export default function App() {
   };
 
   const mover = async (pasos) => {
-    let jug = juego.jugs[juego.turno];
+    // Capturamos el jugador ACTUAL al inicio del movimiento
+    let jug = { ...juego.jugs[juego.turno] }; 
     let pActual = jug.pos;
 
     for (let i = 0; i < pasos; i++) {
       await esperar(300);
       pActual = (pActual + 1) % 28;
       if (pActual === 0) {
-        jug.$ += 200;
+        jug.$ += 200; // Actualizamos la referencia local
         notificar("Vuelta completa: +200 Bs.");
       }
+      // Actualizamos estado global
       actJugador(jug.id, { pos: pActual, $: jug.$ });
     }
     setUi(p => ({ ...p, moviendo: false }));
@@ -105,16 +111,26 @@ export default function App() {
     const dueno = bienes.duenos[pos];
 
     if (['p', 'r', 's'].includes(casilla.t)) {
-      if (dueno !== undefined && dueno !== j.id) pagar(j, casilla, pos, dueno);
-      else if (dueno === undefined) { setUi(p => ({ ...p, modal: { ...casilla, id: pos } })); return; }
+      if (dueno !== undefined && dueno !== j.id) {
+        pagar(j, casilla, pos, dueno);
+      } else if (dueno === undefined) {
+        setUi(p => ({ ...p, modal: { ...casilla, id: pos } }));
+        // No llamamos a sigTurno aquí, esperamos la acción del usuario.
+        // El estado 'bloqueado' sigue siendo true desde 'lanzar', así que el botón sigue desactivado.
+        return; 
+      }
     } else if (casilla.t === 't') {
       actJugador(j.id, { $: j.$ - 200 });
       notificar("Impuestos: -200 Bs.", "error");
     } else if (casilla.t === 'g') {
       notificar("¡A la cárcel!", "error");
-      setTimeout(() => { actJugador(j.id, { pos: 7 }); sigTurno(); }, 1000);
+      setTimeout(() => { 
+        actJugador(j.id, { pos: 7 }); 
+        sigTurno(); 
+      }, 1000);
       return;
     }
+    
     sigTurno();
   };
 
@@ -126,7 +142,14 @@ export default function App() {
       notificar(`Compraste ${c.n}`, "success");
       setUi(p => ({ ...p, modal: null }));
       sigTurno();
-    } else notificar("Sin fondos", "error");
+    } else {
+      notificar("Sin fondos", "error");
+    }
+  };
+
+  const rechazarCompra = () => {
+    setUi(p => ({ ...p, modal: null }));
+    sigTurno();
   };
 
   const pagar = (pagador, c, pos, idDueno) => {
@@ -136,10 +159,19 @@ export default function App() {
     actJugador(idDueno, { $: juego.jugs[idDueno].$ + monto });
     setBienes(p => ({ ...p, niveles: { ...p.niveles, [pos]: nvl + 1 } }));
     notificar(`Alquiler: -${monto} Bs.`, "info");
-    sigTurno();
   };
 
-  const sigTurno = () => !ui.modal && setTimeout(() => setJuego(p => ({ ...p, turno: (p.turno + 1) % p.jugs.length })), 1000);
+  const sigTurno = () => {
+    // Esperamos 1s para que el usuario vea el resultado
+    setTimeout(() => {
+        setJuego(p => ({ 
+            ...p, 
+            turno: (p.turno + 1) % p.jugs.length 
+        }));
+        // ¡IMPORTANTE! Solo desbloqueamos el juego DESPUÉS de haber cambiado el turno
+        setUi(p => ({ ...p, bloqueado: false }));
+    }, 1000);
+  };
 
   return (
     <div className="h-screen w-full flex flex-col items-center justify-center bg-sky-100 font-sans text-slate-800 overflow-hidden select-none">
@@ -147,8 +179,25 @@ export default function App() {
         <div className="grid grid-cols-8 grid-rows-8 w-full h-full gap-[2px] bg-sky-50">
           {TABLERO.map((c, i) => <Casilla key={i} datos={c} i={i} dueno={bienes.duenos[i]} nvl={bienes.niveles[i]} jugs={juego.jugs} />)}
           <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
-            <button onClick={lanzar} disabled={!juego.activo || dado.girando || ui.moviendo} className={`pointer-events-auto w-24 h-24 rounded-2xl flex items-center justify-center bg-white shadow-xl border-4 border-sky-100 transition-transform active:scale-95 ${(!juego.activo || dado.girando) ? 'opacity-80' : 'hover:scale-105'}`}>
-              <AnimatePresence mode="wait">{dado.girando ? <motion.div animate={{ rotate: 360 }} transition={{ repeat: Infinity, duration: 0.5 }}><Dice5 size={48} className="text-sky-500"/></motion.div> : <motion.div initial={{ scale: 0 }} animate={{ scale: 1 }} className="text-3xl font-bold text-sky-600">{dado.valor || "Tirar"}</motion.div>}</AnimatePresence>
+            <button 
+              onClick={lanzar} 
+              // Deshabilitado si el juego no está activo, el dado gira, se mueve ficha, hay modal O el sistema está "bloqueado" procesando turno
+              disabled={!juego.activo || dado.girando || ui.moviendo || ui.modal || ui.bloqueado} 
+              className={`pointer-events-auto w-24 h-24 rounded-2xl flex items-center justify-center bg-white shadow-xl border-4 border-sky-100 transition-transform active:scale-95 ${(!juego.activo || dado.girando || ui.moviendo || ui.bloqueado) ? 'opacity-80' : 'hover:scale-105'}`}
+            >
+              <AnimatePresence mode="wait">
+                {dado.girando ? 
+                  <motion.div animate={{ rotate: 360 }} transition={{ repeat: Infinity, duration: 0.5 }}>
+                    <Dice5 size={48} className="text-sky-500"/>
+                  </motion.div> 
+                : 
+                  <motion.div initial={{ scale: 0 }} animate={{ scale: 1 }} className="flex flex-col items-center">
+                    <span className="text-3xl font-bold text-sky-600">{dado.valor || "Tirar"}</span>
+                    {dado.valor && !ui.bloqueado && <span className="text-[10px] text-slate-400 font-bold">TU TURNO</span>}
+                    {ui.bloqueado && <span className="text-[10px] text-orange-400 font-bold">ESPERE...</span>}
+                  </motion.div>
+                }
+              </AnimatePresence>
             </button>
           </div>
         </div>
@@ -170,7 +219,10 @@ export default function App() {
         {ui.modal && <motion.div initial={{opacity:0, scale:0.8}} animate={{opacity:1, scale:1}} exit={{opacity:0}} className="absolute inset-0 bg-black/50 flex items-center justify-center z-50">
             <div className="bg-white p-6 rounded-2xl shadow-2xl w-72 text-center border-4 border-white">
               <h3 className="font-bold text-lg">{ui.modal.n}</h3><div className={`h-2 w-full ${ui.modal.c} rounded-full my-3`}></div><div className="text-4xl font-bold text-green-600 mb-6">{ui.modal.$} Bs</div>
-              <div className="flex gap-2"><button onClick={() => setUi(p => ({...p, modal: null}))} className="flex-1 py-2 bg-red-100 text-red-600 rounded-lg font-bold">No</button><button onClick={comprar} className="flex-1 py-2 bg-green-500 text-white rounded-lg font-bold">Comprar</button></div>
+              <div className="flex gap-2">
+                <button onClick={rechazarCompra} className="flex-1 py-2 bg-red-100 text-red-600 rounded-lg font-bold hover:bg-red-200">No</button>
+                <button onClick={comprar} className="flex-1 py-2 bg-green-500 text-white rounded-lg font-bold hover:bg-green-600">Comprar</button>
+              </div>
             </div>
         </motion.div>}
         {ui.aviso && <motion.div initial={{y:-50}} animate={{y:20}} exit={{y:-50}} className={`absolute top-0 px-6 py-2 rounded-full text-white font-bold shadow-lg z-50 ${ui.aviso.tipo === 'error' ? 'bg-red-500' : 'bg-sky-500'}`}>{ui.aviso.txt}</motion.div>}
